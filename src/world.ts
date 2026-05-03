@@ -72,7 +72,7 @@ const ATRIUM: RoomDef = {
   width: 1600,
   height: 1200,
   spawnX: 800,
-  spawnY: 600,
+  spawnY: 880,
   floorTint: 0x141a2e,
   poolTint: 0xf5b39a,
   walls: [
