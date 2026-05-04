@@ -10,13 +10,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-  "@colyseus/schema": "^3.0.0",
-  "@colyseus/ws-transport": "^0.16.0",
-  "colyseus": "^0.16.0",
-  "cors": "^2.8.5",
-  "express": "^4.21.0",
-  "firebase-admin": "^12.5.0"
-},
+    "@colyseus/schema": "^3.0.0",
+    "@colyseus/ws-transport": "^0.16.0",
+    "colyseus": "^0.16.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "firebase-admin": "^12.5.0",
+    "livekit-server-sdk": "^2.15.2"
+  },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",

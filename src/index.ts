@@ -4,16 +4,20 @@ import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WorldRoom } from './rooms/WorldRoom';
+import { handleLivekitToken } from './livekit';
 
 const port = Number(process.env.PORT) || 2567;
 const app = express();
 
 app.use(cors());
+app.use(express.json());
 
-// Health endpoint — Fly's load balancer pings this to know the machine is alive.
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
+
+// Voice token issuance. Client posts its Firebase ID token, gets a LiveKit JWT.
+app.post('/livekit-token', handleLivekitToken);
 
 const httpServer = createServer(app);
 
@@ -21,7 +25,6 @@ const gameServer = new Server({
   transport: new WebSocketTransport({ server: httpServer }),
 });
 
-// Register the world room. Clients connect via colyseus.client.joinOrCreate('world', ...)
 gameServer.define('world', WorldRoom);
 
 gameServer
