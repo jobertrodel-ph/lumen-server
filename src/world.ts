@@ -1,242 +1,237 @@
 /**
- * Shared world map data. Authoritative source of truth for layout, walls,
- * portals, and zones. Used by:
+ * Shared world map. Three rooms in a modern-cultivation aesthetic:
  *
- *  - Server: collision validation, zone tracking
- *  - Client: rendering walls, registering portals, drawing zone hints
- *
- * Coordinates are in world pixels. Origin is top-left of each room.
- * Each room is its own coordinate space; portals teleport between them.
+ *  - rooftop : Rooftop Garden (天台园) — spawn point, social hub
+ *  - subway  : Late-Night Subway (末班车) — liminal urban
+ *  - karaoke : Private Karaoke (私人房) — booths for group voice
  */
 
-export type RoomId = 'atrium' | 'library' | 'garden';
+export type RoomId = 'rooftop' | 'subway' | 'karaoke';
 
-export interface Rect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+export interface Rect { x: number; y: number; width: number; height: number; }
 
 export interface Portal {
-  /** Trigger area — walking into this teleports the player. */
   bounds: Rect;
-  /** Destination room. */
   toRoom: RoomId;
-  /** Spawn position in destination room. */
   spawnX: number;
   spawnY: number;
-  /** Display label, e.g. "→ Library". */
   label: string;
 }
 
 export interface Zone {
-  /** Unique id. Used by server for grouping & by Phase 4 voice routing. */
   id: string;
-  /** Bounds — when player is inside, they are "in" this zone. */
   bounds: Rect;
-  /** Display name, shown to players in the zone. */
   name: string;
 }
 
 export interface RoomDef {
   id: RoomId;
-  /** Display name (in HUD when entering). */
   name: string;
-  /** Room dimensions in world pixels. */
+  /** Bilingual subtitle shown briefly on entry. */
+  subtitle: string;
   width: number;
   height: number;
-  /** Default spawn for first-time entry to this room. */
   spawnX: number;
   spawnY: number;
-  /** Floor tint — drives the room's light/mood. CSS hex. */
+  /** Floor base color. */
   floorTint: number;
-  /** Ambient pool color. */
+  /** Accent for ambient pools / room glow. */
   poolTint: number;
-  /** Walls — solid rectangles that block movement. */
   walls: Rect[];
-  /** Portals into other rooms. */
   portals: Portal[];
-  /** Named conversation zones. */
   zones: Zone[];
-  /** Decorative ambient pool positions (for atmospheric lighting). */
   pools: Array<{ x: number; y: number; scale: number }>;
 }
 
-// =============================================================================
-// THE ATRIUM — central plaza, warm peach, fountain in the middle
-// =============================================================================
-const ATRIUM: RoomDef = {
-  id: 'atrium',
-  name: 'The Atrium',
-  width: 1600,
+// ============================================================================
+// THE ROOFTOP GARDEN — spawn point, warm and open
+// ============================================================================
+const ROOFTOP: RoomDef = {
+  id: 'rooftop',
+  name: 'The Rooftop Garden',
+  subtitle: '天台园',
+  width: 1700,
   height: 1200,
-  spawnX: 800,
-  spawnY: 880,
-  floorTint: 0x141a2e,
-  poolTint: 0xf5b39a,
+  spawnX: 850,
+  spawnY: 900,
+  floorTint: 0x18221c,       // deep mossy green-black
+  poolTint: 0x7fc4a3,        // jade
   walls: [
-    // Outer perimeter — leave gaps where portals are.
-    { x: 0, y: 0, width: 1600, height: 24 },           // top
-    { x: 0, y: 1176, width: 1600, height: 24 },        // bottom
-    { x: 0, y: 0, width: 24, height: 500 },            // left top
-    { x: 0, y: 700, width: 24, height: 500 },          // left bottom (gap = library portal)
-    { x: 1576, y: 0, width: 24, height: 500 },         // right top
-    { x: 1576, y: 700, width: 24, height: 500 },       // right bottom (gap = garden portal)
-    // Central fountain — circular wall approximated with 4 thin rects.
-    { x: 720, y: 540, width: 160, height: 16 },
-    { x: 720, y: 644, width: 160, height: 16 },
-    { x: 720, y: 540, width: 16, height: 120 },
-    { x: 864, y: 540, width: 16, height: 120 },
+    // Outer railing — thin perimeter walls (you can see past them, can't pass).
+    { x: 0, y: 0, width: 1700, height: 24 },
+    { x: 0, y: 1176, width: 1700, height: 24 },
+    { x: 0, y: 0, width: 24, height: 500 },
+    { x: 0, y: 700, width: 24, height: 500 },           // gap = subway portal
+    { x: 1676, y: 0, width: 24, height: 500 },
+    { x: 1676, y: 700, width: 24, height: 500 },        // gap = karaoke portal
+    // Koi pond surround — central feature.
+    { x: 720, y: 480, width: 220, height: 16 },
+    { x: 720, y: 600, width: 220, height: 16 },
+    { x: 720, y: 480, width: 16, height: 136 },
+    { x: 924, y: 480, width: 16, height: 136 },
+    // Bonsai planters scattered.
+    { x: 280, y: 240, width: 80, height: 80 },
+    { x: 1340, y: 240, width: 80, height: 80 },
+    { x: 280, y: 880, width: 80, height: 80 },
+    { x: 1340, y: 880, width: 80, height: 80 },
   ],
   portals: [
     {
       bounds: { x: 0, y: 540, width: 24, height: 120 },
-      toRoom: 'library',
-      spawnX: 1440,
+      toRoom: 'subway',
+      spawnX: 1300,
       spawnY: 500,
-      label: 'Library',
+      label: 'Subway',
     },
     {
-      bounds: { x: 1576, y: 540, width: 24, height: 120 },
-      toRoom: 'garden',
+      bounds: { x: 1676, y: 540, width: 24, height: 120 },
+      toRoom: 'karaoke',
       spawnX: 80,
       spawnY: 500,
-      label: 'Garden',
+      label: 'Karaoke',
     },
   ],
   zones: [
-    { id: 'atrium-fountain', name: 'The Fountain', bounds: { x: 600, y: 420, width: 400, height: 360 } },
-    { id: 'atrium-northeast', name: 'Northeast Corner', bounds: { x: 1100, y: 100, width: 400, height: 280 } },
-    { id: 'atrium-southwest', name: 'Southwest Corner', bounds: { x: 100, y: 820, width: 400, height: 280 } },
+    { id: 'rooftop-pond',     name: 'Koi Pond',       bounds: { x: 600, y: 380, width: 460, height: 320 } },
+    { id: 'rooftop-northeast', name: 'String Lights',  bounds: { x: 1080, y: 100, width: 480, height: 280 } },
+    { id: 'rooftop-southwest', name: 'Bonsai Corner',  bounds: { x: 140, y: 800, width: 480, height: 280 } },
   ],
   pools: [
     { x: 200, y: 200, scale: 1.4 },
-    { x: 1400, y: 200, scale: 1.2 },
+    { x: 1500, y: 200, scale: 1.2 },
     { x: 200, y: 1000, scale: 1.0 },
-    { x: 1400, y: 1000, scale: 1.3 },
-    { x: 800, y: 600, scale: 1.6 }, // fountain glow
+    { x: 1500, y: 1000, scale: 1.3 },
+    { x: 830, y: 540, scale: 1.6 }, // pond glow
   ],
 };
 
-// =============================================================================
-// THE LIBRARY — soft amber, bookshelves & reading nooks
-// =============================================================================
-const LIBRARY: RoomDef = {
-  id: 'library',
-  name: 'The Library',
+// ============================================================================
+// THE LATE-NIGHT SUBWAY — liminal, cool, atmospheric
+// ============================================================================
+const SUBWAY: RoomDef = {
+  id: 'subway',
+  name: 'Late-Night Subway',
+  subtitle: '末班车',
   width: 1500,
-  height: 1000,
-  spawnX: 1440,
+  height: 900,
+  spawnX: 1300,
   spawnY: 500,
-  floorTint: 0x1a1612,
-  poolTint: 0xe8b88a,
+  floorTint: 0x12141c,       // concrete cool dark
+  poolTint: 0x8aa8c8,        // pale fluorescent blue
   walls: [
-    { x: 0, y: 0, width: 1500, height: 24 },
-    { x: 0, y: 976, width: 1500, height: 24 },
-    { x: 0, y: 0, width: 24, height: 1000 },
-    { x: 1476, y: 0, width: 24, height: 440 },
-    { x: 1476, y: 560, width: 24, height: 440 },
-    // Bookshelves — running parallel rows that define reading nooks between them.
-    { x: 200, y: 180, width: 360, height: 24 },
-    { x: 200, y: 380, width: 360, height: 24 },
-    { x: 200, y: 580, width: 360, height: 24 },
-    { x: 200, y: 780, width: 360, height: 24 },
-    { x: 760, y: 180, width: 360, height: 24 },
-    { x: 760, y: 380, width: 360, height: 24 },
-    { x: 760, y: 580, width: 360, height: 24 },
-    { x: 760, y: 780, width: 360, height: 24 },
+    // Track wall (north side, behind the platform — thick, can't reach trains).
+    { x: 0, y: 0, width: 1500, height: 180 },
+    // South wall (back wall of station with vending machine).
+    { x: 0, y: 800, width: 1500, height: 100 },
+    // Sides.
+    { x: 0, y: 180, width: 24, height: 620 },
+    { x: 1476, y: 180, width: 24, height: 320 },        // gap = back to rooftop
+    { x: 1476, y: 620, width: 24, height: 180 },
+    // Two benches mid-platform.
+    { x: 380, y: 460, width: 200, height: 28 },
+    { x: 920, y: 460, width: 200, height: 28 },
+    // Vending machine block.
+    { x: 200, y: 720, width: 64, height: 80 },
+    // Pillar.
+    { x: 740, y: 380, width: 32, height: 32 },
   ],
   portals: [
     {
-      bounds: { x: 1476, y: 440, width: 24, height: 120 },
-      toRoom: 'atrium',
+      bounds: { x: 1476, y: 500, width: 24, height: 120 },
+      toRoom: 'rooftop',
       spawnX: 60,
       spawnY: 600,
-      label: 'Atrium',
+      label: 'Rooftop',
     },
   ],
   zones: [
-    { id: 'library-nook-a', name: 'Reading Nook A', bounds: { x: 220, y: 220, width: 320, height: 140 } },
-    { id: 'library-nook-b', name: 'Reading Nook B', bounds: { x: 220, y: 620, width: 320, height: 140 } },
-    { id: 'library-nook-c', name: 'Reading Nook C', bounds: { x: 780, y: 220, width: 320, height: 140 } },
-    { id: 'library-nook-d', name: 'Reading Nook D', bounds: { x: 780, y: 620, width: 320, height: 140 } },
-    { id: 'library-back', name: 'Back of the Library', bounds: { x: 1180, y: 100, width: 280, height: 800 } },
+    { id: 'subway-bench-east', name: 'East Bench',   bounds: { x: 360, y: 500, width: 240, height: 200 } },
+    { id: 'subway-bench-west', name: 'West Bench',   bounds: { x: 900, y: 500, width: 240, height: 200 } },
+    { id: 'subway-vending',    name: 'By the Machine', bounds: { x: 160, y: 600, width: 200, height: 180 } },
   ],
   pools: [
-    { x: 380, y: 290, scale: 0.6 },
-    { x: 380, y: 690, scale: 0.6 },
-    { x: 940, y: 290, scale: 0.6 },
-    { x: 940, y: 690, scale: 0.6 },
-    { x: 1320, y: 500, scale: 1.4 },
+    { x: 280, y: 300, scale: 0.8 },
+    { x: 760, y: 280, scale: 1.0 },
+    { x: 1240, y: 300, scale: 0.8 },
+    { x: 480, y: 600, scale: 0.9 },
+    { x: 1020, y: 600, scale: 0.9 },
   ],
 };
 
-// =============================================================================
-// THE GARDEN — cool teal, open with grouped benches
-// =============================================================================
-const GARDEN: RoomDef = {
-  id: 'garden',
-  name: 'The Garden',
-  width: 1800,
-  height: 1200,
+// ============================================================================
+// THE KARAOKE LOUNGE — three booths, hot lighting, party energy
+// ============================================================================
+const KARAOKE: RoomDef = {
+  id: 'karaoke',
+  name: 'Private Karaoke',
+  subtitle: '私人房',
+  width: 1600,
+  height: 1100,
   spawnX: 80,
   spawnY: 500,
-  floorTint: 0x0e1a1c,
-  poolTint: 0x7fc4b8,
+  floorTint: 0x1a1018,       // deep magenta-black
+  poolTint: 0xe8b870,        // warm gold
   walls: [
-    { x: 0, y: 0, width: 1800, height: 24 },
-    { x: 0, y: 1176, width: 1800, height: 24 },
-    { x: 0, y: 0, width: 24, height: 440 },
-    { x: 0, y: 560, width: 24, height: 640 },
-    { x: 1776, y: 0, width: 24, height: 1200 },
-    // Hedge clusters — each cluster forms a partial enclosure.
-    { x: 400, y: 240, width: 160, height: 16 },
-    { x: 400, y: 240, width: 16, height: 120 },
-    { x: 1100, y: 800, width: 160, height: 16 },
-    { x: 1244, y: 800, width: 16, height: 120 },
-    { x: 700, y: 600, width: 16, height: 120 },
-    { x: 700, y: 700, width: 200, height: 16 },
+    // Outer.
+    { x: 0, y: 0, width: 1600, height: 24 },
+    { x: 0, y: 1076, width: 1600, height: 24 },
+    { x: 0, y: 180, width: 24, height: 320 },
+    { x: 0, y: 620, width: 24, height: 480 },
+    { x: 0, y: 0, width: 24, height: 180 },             // gap below this for portal
+    { x: 1576, y: 0, width: 24, height: 1100 },
+    // Booth dividers — three booths along the back, separated by L-shaped walls.
+    // Booth A (left)
+    { x: 220, y: 180, width: 320, height: 16 },         // top
+    { x: 220, y: 180, width: 16, height: 240 },         // left side
+    { x: 524, y: 180, width: 16, height: 240 },         // right side
+    // Booth B (center)
+    { x: 640, y: 180, width: 320, height: 16 },
+    { x: 640, y: 180, width: 16, height: 240 },
+    { x: 944, y: 180, width: 16, height: 240 },
+    // Booth C (right)
+    { x: 1060, y: 180, width: 320, height: 16 },
+    { x: 1060, y: 180, width: 16, height: 240 },
+    { x: 1364, y: 180, width: 16, height: 240 },
+    // Bar counter (south side, doesn't fully span — leaves walking room).
+    { x: 360, y: 820, width: 880, height: 28 },
   ],
   portals: [
     {
-      bounds: { x: 0, y: 440, width: 24, height: 120 },
-      toRoom: 'atrium',
-      spawnX: 1540,
+      bounds: { x: 0, y: 500, width: 24, height: 120 },
+      toRoom: 'rooftop',
+      spawnX: 1620,
       spawnY: 600,
-      label: 'Atrium',
+      label: 'Rooftop',
     },
   ],
   zones: [
-    { id: 'garden-northwest', name: 'Northwest Bench', bounds: { x: 280, y: 160, width: 320, height: 240 } },
-    { id: 'garden-southeast', name: 'Southeast Bench', bounds: { x: 1080, y: 760, width: 320, height: 240 } },
-    { id: 'garden-center', name: 'Garden Center', bounds: { x: 700, y: 540, width: 360, height: 280 } },
+    { id: 'karaoke-booth-a', name: 'Booth A',    bounds: { x: 240, y: 200, width: 280, height: 200 } },
+    { id: 'karaoke-booth-b', name: 'Booth B',    bounds: { x: 660, y: 200, width: 280, height: 200 } },
+    { id: 'karaoke-booth-c', name: 'Booth C',    bounds: { x: 1080, y: 200, width: 280, height: 200 } },
+    { id: 'karaoke-floor',   name: 'Dance Floor', bounds: { x: 600, y: 500, width: 400, height: 280 } },
+    { id: 'karaoke-bar',     name: 'At the Bar', bounds: { x: 380, y: 860, width: 840, height: 180 } },
   ],
   pools: [
-    { x: 480, y: 320, scale: 1.2 },
-    { x: 880, y: 660, scale: 1.5 },
-    { x: 1180, y: 880, scale: 1.2 },
-    { x: 1500, y: 300, scale: 1.0 },
-    { x: 300, y: 900, scale: 1.0 },
+    { x: 800, y: 600, scale: 1.6 }, // dance floor
+    { x: 380, y: 320, scale: 0.8 }, // booth A glow
+    { x: 800, y: 320, scale: 0.8 }, // booth B glow
+    { x: 1220, y: 320, scale: 0.8 },// booth C glow
+    { x: 800, y: 920, scale: 1.0 }, // bar glow
   ],
 };
 
 export const ROOMS: Record<RoomId, RoomDef> = {
-  atrium: ATRIUM,
-  library: LIBRARY,
-  garden: GARDEN,
+  rooftop: ROOFTOP,
+  subway: SUBWAY,
+  karaoke: KARAOKE,
 };
 
 // =============================================================================
-// Helpers — pure, used by both client (movement preview) and server (validation)
+// Helpers
 // =============================================================================
 
-/** AABB collision check between a circular avatar and a wall rectangle. */
 export function avatarCollidesWithWall(
-  cx: number,
-  cy: number,
-  radius: number,
-  wall: Rect
+  cx: number, cy: number, radius: number, wall: Rect
 ): boolean {
   const closestX = Math.max(wall.x, Math.min(cx, wall.x + wall.width));
   const closestY = Math.max(wall.y, Math.min(cy, wall.y + wall.height));
@@ -245,7 +240,6 @@ export function avatarCollidesWithWall(
   return dx * dx + dy * dy < radius * radius;
 }
 
-/** Returns true if (x, y) is inside any wall of the room. */
 export function isBlocked(roomId: RoomId, x: number, y: number, radius: number): boolean {
   const room = ROOMS[roomId];
   for (const wall of room.walls) {
@@ -254,7 +248,6 @@ export function isBlocked(roomId: RoomId, x: number, y: number, radius: number):
   return false;
 }
 
-/** Returns the zone id at (x, y) in a room, or null if outside any zone. */
 export function zoneAt(roomId: RoomId, x: number, y: number): string | null {
   const room = ROOMS[roomId];
   for (const zone of room.zones) {
@@ -266,7 +259,6 @@ export function zoneAt(roomId: RoomId, x: number, y: number): string | null {
   return null;
 }
 
-/** Returns the portal at (x, y) in a room, or null. */
 export function portalAt(roomId: RoomId, x: number, y: number): Portal | null {
   const room = ROOMS[roomId];
   for (const portal of room.portals) {

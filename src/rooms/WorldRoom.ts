@@ -7,13 +7,13 @@ const AVATAR_RADIUS = 20;
 const MAX_PLAYERS = 80;
 const MAX_PIXELS_PER_MS = 0.6;
 
-const VALID_AVATARS = ['ember', 'sage', 'aster', 'rune', 'wren', 'ivy'] as const;
-const DEFAULT_AVATAR = 'ember';
+const VALID_AVATARS = ['yan', 'ren', 'lin', 'mei', 'zhe', 'hao'] as const;
+const DEFAULT_AVATAR = 'yan';
 
 interface MovePayload { x: number; y: number; }
 interface JoinOptions { token?: string; avatarId?: string; }
 
-const VALID_ROOMS: RoomId[] = ['atrium', 'library', 'garden'];
+const VALID_ROOMS: RoomId[] = ['rooftop', 'subway', 'karaoke'];
 function isValidRoom(s: string): s is RoomId {
   return (VALID_ROOMS as string[]).includes(s);
 }
@@ -27,7 +27,6 @@ export class WorldRoom extends Room<WorldState> {
   maxClients = MAX_PLAYERS;
 
   private lastMoveAt = new Map<string, number>();
-  /** uid -> sessionId, so we can find and kick old sessions on rejoin. */
   private sessionByUid = new Map<string, string>();
 
   async onAuth(_client: Client, options: JoinOptions): Promise<AuthResult> {
@@ -97,36 +96,30 @@ export class WorldRoom extends Room<WorldState> {
   }
 
   onJoin(client: Client, options: JoinOptions, auth: AuthResult) {
-    // Dedup: if this uid already has a session, kick the old one before
-    // creating the new player record. This handles sign-out/sign-in without
-    // refresh, mobile tab-switching, network blips, and any other case
-    // where the previous WebSocket didn't cleanly fire onLeave.
+    // Dedup: if this uid already has a session, kick the old one.
     const existingSessionId = this.sessionByUid.get(auth.uid);
     if (existingSessionId && existingSessionId !== client.sessionId) {
       const existingClient = this.clients.find(
         (c) => c.sessionId === existingSessionId
       );
       if (existingClient) {
-        // 4001 is a custom close code — distinct from 4002 (network), 1000 (normal).
-        // Client UI can treat this as "you're now signed in elsewhere".
         existingClient.leave(4001, 'replaced-by-new-session');
       }
-      // Clean up state directly in case onLeave races with this join.
       this.state.players.delete(existingSessionId);
       this.lastMoveAt.delete(existingSessionId);
       console.log(`[world] kicked stale session for ${auth.uid}`);
     }
 
-    const spawn = ROOMS.atrium;
+    const spawn = ROOMS.rooftop;
     const player = new Player();
     player.uid = auth.uid;
     player.displayName = auth.name?.trim() || 'Visitor';
     player.photoURL = auth.picture ?? '';
     player.avatarId = sanitizeAvatarId(options?.avatarId);
-    player.room = 'atrium';
+    player.room = 'rooftop';
     player.x = spawn.spawnX;
     player.y = spawn.spawnY;
-    player.zone = zoneAt('atrium', spawn.spawnX, spawn.spawnY) ?? '';
+    player.zone = zoneAt('rooftop', spawn.spawnX, spawn.spawnY) ?? '';
 
     this.state.players.set(client.sessionId, player);
     this.lastMoveAt.set(client.sessionId, Date.now());
@@ -141,9 +134,6 @@ export class WorldRoom extends Room<WorldState> {
     const player = this.state.players.get(client.sessionId);
     if (player) {
       console.log(`[world] -${player.displayName} — ${this.state.players.size - 1} online`);
-
-      // Only clear the uid -> session mapping if it still points at THIS session.
-      // (Otherwise we'd be clearing a brand-new session that just replaced us.)
       if (this.sessionByUid.get(player.uid) === client.sessionId) {
         this.sessionByUid.delete(player.uid);
       }
