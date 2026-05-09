@@ -1,27 +1,34 @@
 /**
- * Round picker — composes iTunes (primary), YouTube (fallback), and Gemini.
+ * Game preparation — Gemini-curated setlist + iTunes verification.
  *
- * Flow:
- *   1. Gemini parses the query into structured intent.
- *   2. Build an iTunes search term that combines artist, genre, and any
- *      free text. Year is filtered client-side because iTunes' API doesn't
- *      support a year filter.
- *   3. Filter junk (karaoke/cover/tribute albums).
- *   4. Filter played tracks.
- *   5. For each candidate (iTunes' relevance order ~= popularity),
- *      we already have a previewUrl, so we either accept the iTunes
- *      preview directly or — if the user's market blocks it — fall back
- *      to YouTube.
- *   6. Generate distractors via Gemini.
- *   7. Shuffle 4 options.
+ * Flow at game start:
+ *   1. Ask Gemini for 15 iconic songs that match the theme.
+ *      (Asking for more than 10 gives buffer for iTunes misses.)
+ *   2. For each suggestion, look it up on iTunes by (title, artist).
+ *   3. Keep the ones that match and have a preview URL.
+ *   4. If we don't yet have 10, ask Gemini for more — naming the
+ *      already-tried titles in the avoid list so it doesn't repeat them.
+ *   5. Stop when we have 10 verified tracks, or after 3 generation rounds.
+ *
+ * For each verified track:
+ *   6. Ask Gemini for 3 distractors specific to that song's theme.
+ *   7. Shuffle the 4 options and assign letter ids.
+ *
+ * Returns the entire game's 10 rounds, fully prepared. The game flow
+ * (Session B) just iterates through this list.
  */
 
-import { searchTracks, filterJunk, filterByYear, ITunesTrack, findPreview as findItunesPreview } from './itunes';
+import {
+  generateSetlist, generateDistractors, SetlistSong, Distractor,
+} from './gemini';
+import { findSong, ITunesTrack } from './itunes';
 import { findVideo as findYouTubeVideo } from './youtube';
-import { parseQuery, generateDistractors, ParsedQuery, Distractor } from './gemini';
 
-const MAX_CANDIDATES_TO_TRY = 12;
-const VERIFY_DISTRACTORS = false;
+const TARGET_ROUNDS = 10;
+const SETLIST_INITIAL_COUNT = 15;
+const SETLIST_REFILL_COUNT = 8;
+const MAX_GENERATION_ATTEMPTS = 3;
+const MIN_ROUNDS_FOR_GAME = 6;     // if we can't find at least this many, fail
 
 export type AudioSource = 'itunes' | 'youtube';
 
@@ -38,108 +45,178 @@ export interface PlayableTrack {
 }
 
 export interface RoundOption {
-  id: string;
+  id: string;            // 'a' | 'b' | 'c' | 'd'
   title: string;
   artist: string;
   correct?: boolean;
 }
 
-export interface Round {
+export interface PreparedRound {
+  index: number;         // 0..N-1 (display 1..N)
   track: PlayableTrack;
   options: RoundOption[];
   correctOptionId: string;
 }
 
-export class NoPlayableTrackError extends Error {
-  constructor(query: string, attempted: number) {
-    super(`No playable track found for "${query}" after ${attempted} attempts`);
-    this.name = 'NoPlayableTrackError';
+export interface PreparedGame {
+  theme: string;
+  rounds: PreparedRound[];
+  /** Songs Gemini suggested but iTunes couldn't find — useful for debugging. */
+  unverifiedSuggestions: SetlistSong[];
+}
+
+export class GamePrepFailedError extends Error {
+  public readonly verifiedCount: number;
+  constructor(theme: string, verifiedCount: number) {
+    super(
+      `Could not prepare a full ${TARGET_ROUNDS}-round game for "${theme}". ` +
+      `Only ${verifiedCount} verified tracks found. Try a different theme.`
+    );
+    this.name = 'GamePrepFailedError';
+    this.verifiedCount = verifiedCount;
   }
 }
 
-export interface PickRoundOptions {
-  query: string;
-  playedTrackIds: string[];
-  /** ISO 3166 country code for iTunes' relevance ordering. Default 'US'. */
+export interface PrepareGameOptions {
+  theme: string;
+  /** ISO 3166 country code for iTunes lookups. */
   market?: string;
 }
 
-/**
- * Build an iTunes search term from parsed intent. iTunes searches across
- * track title, artist, album, and genre simultaneously, so we just join
- * the structured fields into a single string.
- */
-function buildITunesTerm(parsed: ParsedQuery, originalQuery: string): string {
-  const parts: string[] = [];
-  if (parsed.artist) parts.push(parsed.artist);
-  if (parsed.genre) parts.push(parsed.genre);
-  if (parsed.text) parts.push(parsed.text);
-  // If parsing yielded nothing structural, just send the raw query.
-  const term = parts.join(' ').trim();
-  return term || originalQuery.trim();
-}
+// ---------------------------------------------------------------------------
 
-export async function pickRound(opts: PickRoundOptions): Promise<Round> {
-  const parsed = await parseQuery(opts.query);
-  const term = buildITunesTerm(parsed, opts.query);
-  if (!term) throw new NoPlayableTrackError(opts.query, 0);
-
-  // iTunes accepts large limits — fetch wide so we have room after
-  // filtering for year, junk, and played-set.
-  const rawResults = await searchTracks({
-    term,
-    country: opts.market ?? 'US',
-    limit: 100,
-  });
-
-  // Filter junk → year → played.
-  let candidates = filterJunk(rawResults);
-  candidates = filterByYear(candidates, {
-    year: parsed.year,
-    yearStart: parsed.yearStart,
-    yearEnd: parsed.yearEnd,
-  });
-
-  const playedSet = new Set(opts.playedTrackIds);
-  candidates = candidates.filter((t) => !playedSet.has(t.id));
-
-  if (candidates.length === 0) {
-    throw new NoPlayableTrackError(opts.query, 0);
+export async function prepareGame(opts: PrepareGameOptions): Promise<PreparedGame> {
+  const theme = opts.theme.trim();
+  if (!theme) {
+    throw new GamePrepFailedError(theme, 0);
   }
+  const market = opts.market ?? 'US';
 
-  // iTunes already orders by relevance/popularity for the country —
-  // we keep that order. (No client-side popularity sort needed.)
-  // Try candidates until one is fully playable. Since iTunes results all
-  // have previewUrls, the first try succeeds in nearly all cases. The
-  // YouTube branch only runs if iTunes' preview URL is somehow blocked.
-  let chosen: { track: ITunesTrack; playable: PlayableTrack } | null = null;
-  const tryCount = Math.min(candidates.length, MAX_CANDIDATES_TO_TRY);
+  const verified: ITunesTrack[] = [];
+  const verifiedTitlesLower = new Set<string>();
+  /** Titles Gemini suggested that we already tried (verified or not). */
+  const triedTitles = new Set<string>();
+  const unverified: SetlistSong[] = [];
 
-  for (let i = 0; i < tryCount; i++) {
-    const candidate = candidates[i];
-    const playable = await resolvePlayable(candidate);
-    if (playable) {
-      chosen = { track: candidate, playable };
+  for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt++) {
+    if (verified.length >= TARGET_ROUNDS) break;
+
+    const need = TARGET_ROUNDS - verified.length;
+    const requestCount = attempt === 0
+      ? SETLIST_INITIAL_COUNT
+      : Math.max(SETLIST_REFILL_COUNT, need + 3);
+
+    let suggestions: SetlistSong[] = [];
+    try {
+      suggestions = await generateSetlist({
+        theme,
+        count: requestCount,
+        avoidTitles: Array.from(triedTitles),
+      });
+    } catch (err) {
+      console.warn(`[picker] setlist gen attempt ${attempt + 1} failed:`, (err as Error).message);
+      // If Gemini fails on attempt 0, we've got nothing — propagate.
+      if (attempt === 0) throw err;
       break;
+    }
+
+    if (suggestions.length === 0) {
+      // Gemini is exhausted on this theme.
+      break;
+    }
+
+    // Verify each suggestion against iTunes. Skip already-tried.
+    for (const song of suggestions) {
+      if (verified.length >= TARGET_ROUNDS) break;
+
+      const titleKey = song.title.toLowerCase().trim();
+      if (triedTitles.has(titleKey)) continue;
+      triedTitles.add(titleKey);
+
+      let found: ITunesTrack | null = null;
+      try {
+        found = await findSong(song.title, song.artist, market);
+      } catch (err) {
+        console.warn(`[picker] iTunes lookup failed for "${song.title}":`, (err as Error).message);
+      }
+
+      if (!found) {
+        unverified.push(song);
+        continue;
+      }
+
+      const verifiedKey = found.title.toLowerCase().trim();
+      if (verifiedTitlesLower.has(verifiedKey)) continue;   // dedupe by actual iTunes title
+
+      verified.push(found);
+      verifiedTitlesLower.add(verifiedKey);
     }
   }
 
-  if (!chosen) {
-    throw new NoPlayableTrackError(opts.query, tryCount);
+  if (verified.length < MIN_ROUNDS_FOR_GAME) {
+    throw new GamePrepFailedError(theme, verified.length);
   }
 
-  // Distractors via Gemini.
-  const distractors = await getDistractors({
-    correctTitle: chosen.track.title,
-    correctArtist: chosen.track.artist,
-    correctYear: chosen.track.year,
-    context: opts.query,
-    avoidTitles: [chosen.track.title],
+  // Trim down to exactly TARGET_ROUNDS (or however many we got, up to that).
+  const finalTracks = verified.slice(0, TARGET_ROUNDS);
+
+  // Build distractors + options for each round, in parallel where safe.
+  // We avoid running ALL distractor calls in parallel because that would
+  // burst Gemini's rate limit (15 RPM on the free tier). Limit concurrency.
+  const rounds = await buildRoundsWithLimitedConcurrency(finalTracks, theme, 3);
+
+  return {
+    theme,
+    rounds,
+    unverifiedSuggestions: unverified,
+  };
+}
+
+/**
+ * Build a `PreparedRound` for each verified track — parallel up to `concurrency`.
+ * Sequencing matters: Gemini Flash free tier is 15 RPM, and we already
+ * burned a few calls on setlist generation. Limit to 3 concurrent
+ * distractor calls so we stay under rate limits with margin.
+ */
+async function buildRoundsWithLimitedConcurrency(
+  tracks: ITunesTrack[],
+  theme: string,
+  concurrency: number
+): Promise<PreparedRound[]> {
+  const rounds: PreparedRound[] = new Array(tracks.length);
+  let next = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= tracks.length) return;
+      rounds[i] = await buildRound(tracks[i], i, theme);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, tracks.length) }, () => worker());
+  await Promise.all(workers);
+  return rounds;
+}
+
+async function buildRound(
+  track: ITunesTrack,
+  index: number,
+  theme: string
+): Promise<PreparedRound> {
+  const playable = await resolvePlayable(track);
+
+  const distractors = await getDistractorsSafely({
+    correctTitle: track.title,
+    correctArtist: track.artist,
+    correctYear: track.year,
+    context: theme,
+    avoidTitles: [track.title],
   });
 
   const ids = ['a', 'b', 'c', 'd'];
   const slots: RoundOption[] = [
-    { id: '', title: chosen.track.title, artist: chosen.track.artist, correct: true },
+    { id: '', title: track.title, artist: track.artist, correct: true },
     ...distractors.map((d) => ({ id: '', title: d.title, artist: d.artist })),
   ];
   shuffleInPlace(slots);
@@ -148,19 +225,14 @@ export async function pickRound(opts: PickRoundOptions): Promise<Round> {
   if (!correctOption) throw new Error('Internal: lost track of correct option');
 
   return {
-    track: chosen.playable,
+    index,
+    track: playable,
     options: slots,
     correctOptionId: correctOption.id,
   };
 }
 
-/**
- * iTunes results all have `previewUrl` (we filtered out the ones that
- * don't), so this is mostly a passthrough. The YouTube branch exists
- * only as a defensive fallback in case a previewUrl is somehow null
- * by the time we read it (very rare, but cheap to handle).
- */
-async function resolvePlayable(track: ITunesTrack): Promise<PlayableTrack | null> {
+async function resolvePlayable(track: ITunesTrack): Promise<PlayableTrack> {
   if (track.previewUrl) {
     return {
       id: track.id,
@@ -173,7 +245,8 @@ async function resolvePlayable(track: ITunesTrack): Promise<PlayableTrack | null
     };
   }
 
-  // Defensive YouTube fallback (rarely reached).
+  // Defensive YouTube fallback (rarely reached because findSong already
+  // requires previewUrl to be present).
   try {
     const yt = await findYouTubeVideo(track.title, track.artist);
     if (yt) {
@@ -189,13 +262,23 @@ async function resolvePlayable(track: ITunesTrack): Promise<PlayableTrack | null
       };
     }
   } catch (err) {
-    console.warn('[picker] YouTube lookup failed:', (err as Error).message);
+    console.warn('[picker] YouTube fallback failed:', (err as Error).message);
   }
 
-  return null;
+  // Last resort: still mark as iTunes but with no audio. Session B will
+  // need to handle this (skip the round). In practice this should never
+  // happen because findSong already required previewUrl.
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    year: track.year,
+    coverUrl: track.coverUrl,
+    source: 'itunes',
+  };
 }
 
-async function getDistractors(req: {
+async function getDistractorsSafely(req: {
   correctTitle: string;
   correctArtist: string;
   correctYear: number | null;
@@ -207,37 +290,14 @@ async function getDistractors(req: {
     candidates = await generateDistractors(req);
   } catch (err) {
     console.warn('[picker] distractor generation failed:', (err as Error).message);
-    candidates = [];
   }
-
-  if (!VERIFY_DISTRACTORS) {
-    while (candidates.length < 3) {
-      candidates.push({
-        title: `Mystery Track ${candidates.length + 1}`,
-        artist: 'Unknown',
-      });
-    }
-    return candidates.slice(0, 3);
+  while (candidates.length < 3) {
+    candidates.push({
+      title: `Mystery Track ${candidates.length + 1}`,
+      artist: 'Unknown',
+    });
   }
-
-  // Optional verification: each distractor must exist on iTunes.
-  // Slower (extra HTTP call per distractor) but catches Gemini hallucinations.
-  const validated: Distractor[] = [];
-  const seen = new Set([req.correctTitle.toLowerCase()]);
-  for (const cand of candidates) {
-    if (validated.length >= 3) break;
-    const key = cand.title.toLowerCase();
-    if (seen.has(key)) continue;
-    const found = await findItunesPreview(cand.title, cand.artist);
-    if (found) {
-      validated.push(cand);
-      seen.add(key);
-    }
-  }
-  while (validated.length < 3) {
-    validated.push({ title: `Mystery Track ${validated.length + 1}`, artist: 'Unknown' });
-  }
-  return validated;
+  return candidates.slice(0, 3);
 }
 
 function shuffleInPlace<T>(arr: T[]): void {
@@ -245,4 +305,23 @@ function shuffleInPlace<T>(arr: T[]): void {
     const j = Math.floor(Math.random() * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy export for backwards compatibility — Session B will use prepareGame
+// instead, but keep the single-round picker exported in case anything else
+// is still calling it.
+// ---------------------------------------------------------------------------
+
+export async function pickRound(opts: {
+  query: string;
+  playedTrackIds: string[];
+  market?: string;
+}): Promise<PreparedRound> {
+  // Convenience wrapper: prepare a small game, return the first round.
+  // Inefficient but kept for compatibility.
+  const game = await prepareGame({ theme: opts.query, market: opts.market });
+  const fresh = game.rounds.find((r) => !opts.playedTrackIds.includes(r.track.id));
+  if (!fresh) throw new GamePrepFailedError(opts.query, 0);
+  return fresh;
 }

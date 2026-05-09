@@ -1,5 +1,13 @@
 /**
  * Gemini integration for the music game.
+ *
+ * Three responsibilities:
+ *   1. parseQuery     — text → structured intent (now barely used; the
+ *                       new setlist flow doesn't need this since Gemini
+ *                       interprets the theme directly).
+ *   2. generateSetlist — theme → list of N iconic songs that match.
+ *                        This is the new heart of the game.
+ *   3. generateDistractors — given a correct answer, give 3 plausible wrongs.
  */
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -21,8 +29,8 @@ async function gemini(prompt: string): Promise<string> {
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.4,
-        maxOutputTokens: 800,
+        temperature: 0.5,
+        maxOutputTokens: 2000,
         responseMimeType: 'application/json',
       },
     }),
@@ -46,173 +54,83 @@ function unfenceJson(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Query parsing
+// Setlist generator (new, primary)
 // ---------------------------------------------------------------------------
 
-export interface ParsedQuery {
-  artist?: string;
-  genre?: string;
-  year?: number;
-  yearStart?: number;
-  yearEnd?: number;
-  text?: string;
+export interface SetlistSong {
+  title: string;
+  artist: string;
+  /** Year if Gemini knows it — used for context only, not strict filtering. */
+  year?: number | null;
 }
 
-const KNOWN_GENRES = new Set([
-  'pop', 'rock', 'hip-hop', 'hiphop', 'rap', 'r&b', 'rnb',
-  'country', 'jazz', 'metal', 'edm', 'indie', 'k-pop', 'kpop',
-  'j-pop', 'jpop', 'latin', 'reggae', 'soul', 'funk', 'lo-fi', 'lofi',
-  'electronic', 'house', 'techno', 'dance', 'punk', 'alternative',
-  'classical', 'folk', 'blues', 'disco', 'gospel', 'ska',
-]);
+const SETLIST_PROMPT = `You are picking songs for a music guessing game.
+
+Theme: "THEME_HERE"
+
+List COUNT_HERE iconic, widely-recognized, chart-topping songs that match this theme.
+Prefer songs that:
+  - Are commercially successful and culturally well-known.
+  - Are real, existing songs (do not invent titles or artists).
+  - Were major hits — songs the general public would recognize from the first few seconds.
+  - When the theme is a specific artist, pick that artist's BIGGEST hits across their career.
+  - When the theme is a genre + year, pick the year's TOP CHART HITS in that genre.
+
+AVOID titles already provided in the avoid list: AVOID_HERE
+
+Return ONLY valid JSON in this format. No commentary, no markdown fences:
+[{"title":"...","artist":"...","year":NUMBER_OR_NULL}, ...]`;
 
 /**
- * Phrases that, if present, indicate vague time/scope intent that the
- * fast-path can't resolve precisely. These force a fall-through to Gemini
- * for proper parsing. "early X", "late X", "old X", etc.
+ * Generate a list of iconic songs for a theme.
+ * Returns up to `count` songs, possibly fewer if Gemini gives short results.
+ *
+ * The avoid list contains titles we already verified, plus any titles that
+ * already failed iTunes lookup so Gemini doesn't suggest them again.
  */
-const VAGUE_TIME_WORDS = new Set([
-  'early', 'late', 'old', 'new', 'recent', 'classic', 'vintage',
-  'modern', 'contemporary', 'best', 'top', 'greatest',
-]);
+export async function generateSetlist(args: {
+  theme: string;
+  count: number;
+  avoidTitles: string[];
+}): Promise<SetlistSong[]> {
+  const avoidStr = args.avoidTitles.length === 0
+    ? '(none)'
+    : args.avoidTitles.slice(0, 30).map((t) => `"${t}"`).join(', ');
 
-function normalizeGenre(g: string): string {
-  const lower = g.toLowerCase();
-  if (lower === 'hiphop') return 'hip-hop';
-  if (lower === 'rnb') return 'r&b';
-  if (lower === 'kpop') return 'k-pop';
-  if (lower === 'jpop') return 'j-pop';
-  if (lower === 'lofi') return 'lo-fi';
-  return lower;
-}
+  const prompt = SETLIST_PROMPT
+    .replace('THEME_HERE', args.theme.replace(/"/g, '\\"').slice(0, 200))
+    .replace('COUNT_HERE', String(Math.max(1, Math.min(args.count, 30))))
+    .replace('AVOID_HERE', avoidStr);
 
-const DECADE_REGEX = /^(\d0)s$/;
-const FULL_DECADE_REGEX = /^(19|20)(\d0)s$/;
-
-function fastPathParse(query: string): ParsedQuery | null {
-  const trimmed = query.trim();
-  if (!trimmed) return {};
-
-  const tokens = trimmed.split(/\s+/);
-
-  // Vague-time word? Defer to Gemini — it knows what "early Drake" means.
-  for (const tok of tokens) {
-    if (VAGUE_TIME_WORDS.has(tok.toLowerCase())) return null;
-  }
-
-  const result: ParsedQuery = {};
-  const remaining: string[] = [];
-
-  for (const tok of tokens) {
-    const lower = tok.toLowerCase();
-
-    if (/^\d{4}$/.test(tok)) {
-      const y = parseInt(tok, 10);
-      if (y >= 1900 && y <= new Date().getFullYear() + 1) {
-        result.year = y;
-        continue;
-      }
-    }
-
-    const rangeMatch = tok.match(/^(\d{4})-(\d{4})$/);
-    if (rangeMatch) {
-      result.yearStart = parseInt(rangeMatch[1], 10);
-      result.yearEnd = parseInt(rangeMatch[2], 10);
-      continue;
-    }
-
-    const decade = lower.match(DECADE_REGEX);
-    if (decade) {
-      const d = parseInt(decade[1], 10);
-      const start = d <= 20 ? 2000 + d : 1900 + d;
-      result.yearStart = start;
-      result.yearEnd = start + 9;
-      continue;
-    }
-    const fullDecade = lower.match(FULL_DECADE_REGEX);
-    if (fullDecade) {
-      const start = parseInt(fullDecade[1] + fullDecade[2], 10);
-      result.yearStart = start;
-      result.yearEnd = start + 9;
-      continue;
-    }
-
-    if (KNOWN_GENRES.has(lower)) {
-      result.genre = normalizeGenre(lower);
-      continue;
-    }
-
-    remaining.push(tok);
-  }
-
-  // Structural hits: known genre, year, or year-range. Treat remaining as text.
-  if (result.genre || result.year || result.yearStart) {
-    if (remaining.length > 0) {
-      result.text = remaining.join(' ');
-    }
-    return result;
-  }
-
-  // No structural hits. Be conservative about treating the input as an artist:
-  //   - 1 to 4 tokens (longer = probably a phrase, defer to Gemini)
-  //   - Each token starts with a capital letter (artist-name heuristic)
-  // This catches "Taylor Swift", "BTS", "Olivia Rodrigo", "The Weeknd"
-  // but not "music for studying", "best songs ever", etc.
-  if (remaining.length >= 1 && remaining.length <= 4) {
-    const allCapitalized = remaining.every((t) => /^[A-Z]/.test(t) || /^\d/.test(t));
-    if (allCapitalized && /^[\w\s'.&,-]+$/.test(trimmed) && trimmed.length <= 60) {
-      return { artist: trimmed };
-    }
-  }
-
-  return null;  // Defer to Gemini
-}
-
-const QUERY_PARSE_PROMPT = `Parse a music-game query into JSON.
-
-Fields (all optional):
-  artist (string), genre (string), year (int), yearStart (int), yearEnd (int), text (string)
-
-Examples:
-  "early Drake"          → {"artist":"Drake","yearStart":2009,"yearEnd":2013}
-  "kpop girl groups"     → {"genre":"k-pop","text":"girl group"}
-  "lofi study"           → {"genre":"lo-fi","text":"study"}
-  "best songs ever"      → {"text":"best songs"}
-
-Return ONLY JSON, no markdown.
-
-Query: "QUERY_HERE"`;
-
-export async function parseQuery(query: string): Promise<ParsedQuery> {
-  const fast = fastPathParse(query);
-  if (fast !== null) return fast;
-
-  const prompt = QUERY_PARSE_PROMPT.replace('QUERY_HERE', query.replace(/"/g, '\\"').slice(0, 100));
-  let raw: string;
+  const raw = await gemini(prompt);
+  let parsed: unknown;
   try {
-    raw = await gemini(prompt);
-  } catch (err) {
-    console.warn('[gemini] parseQuery failed, falling back to free-text:', (err as Error).message);
-    return { text: query };
-  }
-
-  try {
-    const parsed = JSON.parse(unfenceJson(raw));
-    const safe: ParsedQuery = {};
-    if (typeof parsed.artist === 'string') safe.artist = parsed.artist.slice(0, 100);
-    if (typeof parsed.genre === 'string') safe.genre = parsed.genre.slice(0, 30);
-    if (typeof parsed.year === 'number') safe.year = parsed.year;
-    if (typeof parsed.yearStart === 'number') safe.yearStart = parsed.yearStart;
-    if (typeof parsed.yearEnd === 'number') safe.yearEnd = parsed.yearEnd;
-    if (typeof parsed.text === 'string') safe.text = parsed.text.slice(0, 100);
-    return safe;
+    parsed = JSON.parse(unfenceJson(raw));
   } catch {
-    return { text: query };
+    throw new Error(`Gemini setlist returned invalid JSON: ${raw.slice(0, 200)}`);
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error('Gemini setlist response was not an array');
+  }
+
+  const out: SetlistSong[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as { title?: unknown; artist?: unknown; year?: unknown };
+    if (typeof obj.title !== 'string' || typeof obj.artist !== 'string') continue;
+    const year = typeof obj.year === 'number' && obj.year > 1900 && obj.year < 2100
+      ? obj.year : null;
+    out.push({
+      title: obj.title.trim().slice(0, 200),
+      artist: obj.artist.trim().slice(0, 200),
+      year,
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
-// Distractor generation
+// Distractor generation (kept, slightly enhanced)
 // ---------------------------------------------------------------------------
 
 export interface DistractorRequest {
@@ -234,11 +152,12 @@ Correct answer: "CORRECT_TITLE" by CORRECT_ARTIST (CORRECT_YEAR).
 Theme: "CONTEXT".
 
 Rules:
-  1. Each distractor must be a REAL, EXISTING song. Not made up.
-  2. Same era (within 2-3 years), similar genre, comparable popularity.
+  1. Each distractor must be a REAL, EXISTING, ICONIC song. Not made up.
+  2. Same era (within 2-3 years), similar genre, comparable popularity to the correct answer.
   3. If the theme names a specific artist, prefer OTHER POPULAR SONGS BY THAT SAME ARTIST.
   4. NEVER include any of these titles: AVOID_TITLES
   5. NEVER include the correct answer.
+  6. Prefer chart-topping, widely-recognized hits — not deep cuts.
 
 Return ONLY valid JSON:
 [{"title":"...","artist":"..."},{"title":"...","artist":"..."},{"title":"...","artist":"..."}]`;
@@ -246,7 +165,7 @@ Return ONLY valid JSON:
 export async function generateDistractors(req: DistractorRequest): Promise<Distractor[]> {
   const yearStr = req.correctYear ? String(req.correctYear) : 'unknown year';
   const avoidStr = req.avoidTitles.length > 0
-    ? req.avoidTitles.slice(0, 12).map((t) => `"${t}"`).join(', ')
+    ? req.avoidTitles.slice(0, 15).map((t) => `"${t}"`).join(', ')
     : '(none)';
 
   const prompt = DISTRACTOR_PROMPT
@@ -263,7 +182,6 @@ export async function generateDistractors(req: DistractorRequest): Promise<Distr
   } catch {
     throw new Error(`Gemini returned invalid distractor JSON: ${raw.slice(0, 200)}`);
   }
-
   if (!Array.isArray(parsed)) {
     throw new Error('Gemini distractor response was not an array');
   }
@@ -279,4 +197,23 @@ export async function generateDistractors(req: DistractorRequest): Promise<Distr
     }
   }
   return out.slice(0, 3);
+}
+
+// ---------------------------------------------------------------------------
+// parseQuery (legacy, no longer in the main flow but kept for compatibility)
+// ---------------------------------------------------------------------------
+
+export interface ParsedQuery {
+  artist?: string;
+  genre?: string;
+  year?: number;
+  yearStart?: number;
+  yearEnd?: number;
+  text?: string;
+}
+
+export async function parseQuery(query: string): Promise<ParsedQuery> {
+  // The new setlist flow doesn't need structured parsing — Gemini takes
+  // the raw theme string. parseQuery now just returns the theme as text.
+  return { text: query };
 }
